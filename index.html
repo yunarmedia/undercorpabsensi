@@ -327,7 +327,9 @@
             <div class="data-grid">
                 <div class="data-box"><h4>Telat</h4><span id="kt-telat">0 Hari</span></div>
                 <div class="data-box"><h4>Libur</h4><span id="kt-libur">0 Hari</span></div>
-                <div class="data-box data-box-full"><h4>Sakit</h4><span id="kt-sakit">0 Hari</span></div>
+                <div class="data-box"><h4>Sakit</h4><span id="kt-sakit">0 Hari</span></div>
+                <div class="data-box"><h4>Alpha</h4><span id="kt-alpha">0 Hari</span></div>
+                <div class="data-box data-box-full"><h4>Total Masuk</h4><span id="kt-masuk">0 Hari</span></div>
             </div>
         </div>
 
@@ -598,7 +600,7 @@
         <div class="card" style="border-top: 4px solid #3b82f6;">
             <h3 style="color: #2563eb;">🧮 Generator Slip Gaji & Outstanding</h3>
             <div class="info-box" style="background: rgba(59, 130, 246, 0.05); color: #1d4ed8; border-color: rgba(59, 130, 246, 0.2); text-align: left; font-size: 12px; line-height: 1.5;">
-                Jika hasil kalkulasi gaji minus akibat kasbon yang melebihi pendapatan, selisihnya akan terhitung otomatis sebagai <b>Kasbon Outstanding</b>. Anda dapat meneruskan sisa hutang ini ke catatan bulan berikutnya.
+                Jika hasil kalkulasi gaji minus akibat kasbon yang melebihi pendapatan, selisihnya akan terhitung otomatis sebagai <b>Kasbon Outstanding</b>.<br>Hari kerja dasar payroll: <b>26 hari</b> setiap bulan, khusus Februari <b>24 hari</b>. Hari masuk di atas angka dasar tetap dibayar. Anda dapat meneruskan sisa hutang ini ke catatan bulan berikutnya.
             </div>
             
             <div class="form-group" style="margin-top: 20px;">
@@ -610,18 +612,18 @@
             </div>
             
             <div class="grid-form">
-                <div class="form-group"><label>Hari Kerja Target</label><input type="number" id="target-hari-kerja" value="26" oninput="kalkulasiOtomatisMasuk()"></div>
-                <div class="form-group"><label style="color:var(--success-color);">Total Masuk Kerja</label><input type="number" id="total-masuk" value="0"></div>
+                <div class="form-group"><label>Hari Kerja Dasar Payroll</label><input type="number" id="target-hari-kerja" value="26" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
+                <div class="form-group"><label style="color:var(--success-color);">Total Masuk Kerja</label><input type="number" id="total-masuk" value="0" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
             </div>
 
             <div class="grid-form">
-                <div class="form-group"><label style="color:var(--danger-color);">Alpha (Tanpa Ket)</label><input type="number" id="total-alpha" value="0" oninput="kalkulasiOtomatisMasuk()"></div>
-                <div class="form-group"><label>Sakit (Hari)</label><input type="number" id="total-sakit" value="0" oninput="kalkulasiOtomatisMasuk()"></div>
+                <div class="form-group"><label style="color:var(--danger-color);">Alpha (Tanpa Ket)</label><input type="number" id="total-alpha" value="0" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
+                <div class="form-group"><label>Sakit (Hari)</label><input type="number" id="total-sakit" value="0" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
             </div>
 
             <div class="grid-form">
-                <div class="form-group"><label style="color:var(--danger-color);">Dari Masuk, Brp X Telat?</label><input type="number" id="total-telat" value="0"></div>
-                <div class="form-group"><label>Libur Reguler (Hari)</label><input type="number" id="total-libur" value="4"></div>
+                <div class="form-group"><label style="color:var(--danger-color);">Dari Masuk, Brp X Telat?</label><input type="number" id="total-telat" value="0" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
+                <div class="form-group"><label>Libur Reguler (Hari)</label><input type="number" id="total-libur" value="0" readonly style="background:#f1f5f9; cursor:not-allowed;"></div>
             </div>
             
             <div class="form-group"><label>Gaji Sebulan (Rp)</label><input type="number" id="gaji-bulanan" value="3000000"></div>
@@ -670,6 +672,7 @@
                             <option value="Hadir">Hanya Kehadiran (Masuk)</option>
                             <option value="Telat">Hanya Terlambat</option>
                             <option value="Sakit">Hanya Sakit</option>
+                            <option value="Alpha">Hanya Alpha</option>
                             <option value="Libur Reguler">Hanya Libur Reguler</option>
                             <option value="Data Kasbon">Hanya Pengajuan Kasbon</option>
                         </select>
@@ -1091,25 +1094,82 @@
         } catch(error) { hideLoading(); suaraGagal.play().catch(e => console.log(e)); showToast("Gagal mengunggah data.", "error"); }
     }
 
+
+    // ==========================================
+    // UPSERT ABSENSI PER TANGGAL
+    // Satu karyawan = satu status absensi per tanggal.
+    // Jika sebelumnya Alpha lalu Admin memasukkan Hadir/Telat/Sakit,
+    // record Alpha diganti, bukan ditambah sebagai duplikat.
+    // ==========================================
+    async function simpanAbsensiHarian(nama, tanggalISO, status, ekstra = {}) {
+        const [tahun, bulan1, tanggal] = tanggalISO.split("-").map(Number);
+        const bulan = bulan1 - 1;
+
+        const snap = await db.collection("absensi")
+            .where("nama", "==", nama)
+            .where("bulan", "==", bulan)
+            .where("tahun", "==", tahun)
+            .get();
+
+        const kandidat = snap.docs.filter(doc => normalisasiTanggalAbsen(doc.data()) === tanggal);
+
+        const data = {
+            nama,
+            status,
+            tanggal,
+            bulan,
+            tahun,
+            timestamp: new Date(tahun, bulan, tanggal, 12, 0, 0).getTime(),
+            waktu: ekstra.waktu || new Date(tahun, bulan, tanggal, 12, 0, 0).toLocaleString("id-ID"),
+            ...ekstra
+        };
+
+        // Pertahankan ID pertama agar record tetap stabil.
+        const ref = kandidat.length ? kandidat[0].ref : db.collection("absensi").doc(
+            `absen_${nama}_${tahun}_${String(bulan1).padStart(2,"0")}_${String(tanggal).padStart(2,"0")}`
+        );
+
+        await ref.set(data, { merge: true });
+
+        // Hapus duplikat absensi pada tanggal yang sama.
+        for (let i = 1; i < kandidat.length; i++) {
+            await kandidat[i].ref.delete();
+        }
+
+        return ref;
+    }
+
     async function kirimAbsenAdminManual() {
-        const namaKaryawan = document.getElementById("admin-absen-nama").value; const tglInput = document.getElementById("admin-absen-tanggal").value;
-        const jamInput = document.getElementById("admin-absen-jam").value; const statusVal = document.getElementById("admin-absen-status").value;
-        if(!namaKaryawan) return showToast("Pilih nama karyawan!", "warning"); if(!tglInput) return showToast("Harap pilih tanggal absen!", "warning");
+        const nama = document.getElementById("admin-absen-nama").value;
+        const tanggal = document.getElementById("admin-absen-tanggal").value;
+        const jam = document.getElementById("admin-absen-jam").value;
+        const status = document.getElementById("admin-absen-status").value;
 
-        let dateObj = new Date(tglInput); const [hours, minutes] = jamInput ? jamInput.split(':') : [8, 0]; dateObj.setHours(parseInt(hours), parseInt(minutes), 0);
-        const bln = parseInt(dateObj.getMonth()); const thn = parseInt(dateObj.getFullYear()); const tgl = parseInt(dateObj.getDate());
-        const waktuStr = dateObj.toLocaleString('id-ID'); const ts = dateObj.getTime();
+        if (!nama || !tanggal || !status) {
+            return showToast("Lengkapi nama, tanggal, dan status!", "warning");
+        }
 
-        showLoading("Menyimpan Absensi Manual...");
+        showLoading("Menyimpan absensi manual...");
         try {
-            const targetUser = arrUsers[namaKaryawan];
-            await db.collection("absensi").add({ 
-                nama: namaKaryawan, perusahaan: targetUser.perusahaan, status: statusVal, shift: "Input Manual",
-                kasbonUang: 0, kasbonMakan: 0, fotoBuktiKasbon: null, fotoSelfie: null,
-                waktu: waktuStr, timestamp: ts, tanggal: tgl, bulan: bln, tahun: thn, lokasi: "Input Manual Admin" 
+            const user = arrUsers[nama] || {};
+            await simpanAbsensiHarian(nama, tanggal, status, {
+                perusahaan: user.perusahaan || "",
+                posisi: user.posisi || "",
+                shift: status === "Libur Reguler" ? "Libur Reguler" : "",
+                waktu: `${tanggal} ${jam || "08:00"}`
             });
-            hideLoading(); showToast("Absensi manual berhasil disimpan!", "success"); document.getElementById("admin-absen-tanggal").value = ""; muatTabelAbsen(); 
-        } catch(error) { hideLoading(); showToast("Gagal menyimpan absensi.", "error"); }
+
+            await fetchUsers();
+            if (typeof generateAlphaOtomatis === "function") await generateAlphaOtomatis();
+            muatTabelAbsen();
+
+            showToast(`Absensi ${nama.toUpperCase()} tanggal ${tanggal} berhasil disimpan sebagai ${status}.`, "success");
+        } catch (e) {
+            console.error("Gagal simpan absensi manual:", e);
+            showToast("Gagal menyimpan absensi manual.", "error");
+        } finally {
+            hideLoading();
+        }
     }
 
     // CABUT LIMIT KASBON ADMIN: Bebas input nominal
@@ -1387,83 +1447,276 @@
         }
     }
 
+    // ==========================================
+    // SUMBER KEBENARAN ABSENSI
+    // Total Masuk = Hadir + Telat
+    // Alpha/Sakit/Libur tidak dihitung sebagai masuk.
+    // Semua angka slip ditarik langsung dari Firebase.
+    // ==========================================
+    function hitungHariLiburRegulerDalamBulan(tahun, bulan, hariLibur) {
+        if (hariLibur === undefined || hariLibur === null || hariLibur === "") return 0;
+        const target = parseInt(hariLibur);
+        if (Number.isNaN(target)) return 0;
+
+        const jumlahHari = new Date(tahun, bulan + 1, 0).getDate();
+        let total = 0;
+        for (let tgl = 1; tgl <= jumlahHari; tgl++) {
+            if (new Date(tahun, bulan, tgl).getDay() === target) total++;
+        }
+        return total;
+    }
+
+    function setNilaiSlip(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.value = Math.max(0, parseInt(value) || 0);
+    }
+
+    function normalisasiTanggalAbsen(a) {
+        const t = parseInt(a.tanggal);
+        if (!Number.isNaN(t) && t > 0) return t;
+        if (a.timestamp) {
+            const d = new Date(a.timestamp);
+            if (!Number.isNaN(d.getTime())) return d.getDate();
+        }
+        return null;
+    }
+
+
+    // ==========================================
+    // AUTO ALPHA: PROSES TANGGAL YANG SUDAH LEWAT
+    // ==========================================
+    async function generateAlphaOtomatis() {
+        const now = new Date();
+        const bln = now.getMonth();
+        const thn = now.getFullYear();
+        const kemarin = now.getDate() - 1;
+
+        if (kemarin < 1) return { alpha: 0, libur: 0 };
+
+        let alphaDibuat = 0;
+        let liburDibuat = 0;
+
+        for (const nama in arrUsers) {
+            const user = arrUsers[nama] || {};
+            if (nama === "admin" || user.role === "owner") continue;
+            if (user.hariLibur === undefined || user.hariLibur === "") continue;
+
+            const hariLibur = parseInt(user.hariLibur);
+            if (Number.isNaN(hariLibur)) continue;
+
+            const snap = await db.collection("absensi")
+                .where("nama", "==", nama)
+                .where("bulan", "==", bln)
+                .where("tahun", "==", thn)
+                .get();
+
+            const tanggalSudahAda = new Set();
+            snap.forEach(doc => {
+                const t = normalisasiTanggalAbsen(doc.data());
+                if (t) tanggalSudahAda.add(t);
+            });
+
+            for (let tgl = 1; tgl <= kemarin; tgl++) {
+                if (tanggalSudahAda.has(tgl)) continue;
+
+                const tanggalObj = new Date(thn, bln, tgl, 12, 0, 0);
+                const isLibur = tanggalObj.getDay() === hariLibur;
+                const status = isLibur ? "Libur Reguler" : "Alpha";
+
+                await simpanAbsensiHarian(
+                    nama,
+                    `${thn}-${String(bln + 1).padStart(2, "0")}-${String(tgl).padStart(2, "0")}`,
+                    status,
+                    {
+                        perusahaan: user.perusahaan || "",
+                        posisi: user.posisi || "",
+                        shift: isLibur ? "Libur Reguler" : "Tidak Absen",
+                        lokasi: "Sistem Otomatis",
+                        kasbonUang: 0,
+                        kasbonMakan: 0,
+                        fotoSelfie: null
+                    }
+                );
+
+                if (isLibur) liburDibuat++;
+                else alphaDibuat++;
+            }
+        }
+
+        return { alpha: alphaDibuat, libur: liburDibuat };
+    }
+
+    async function ambilRingkasanAbsensi(namaKaryawan, bulan = new Date().getMonth(), tahun = new Date().getFullYear()) {
+        const snap = await db.collection("absensi")
+            .where("nama", "==", namaKaryawan)
+            .where("bulan", "==", bulan)
+            .where("tahun", "==", tahun)
+            .get();
+
+        const ringkas = {
+            hadir: 0,
+            telat: 0,
+            sakit: 0,
+            alpha: 0,
+            libur: 0,
+            kasbonUang: 0,
+            kasbonMakan: 0,
+            tanggalStatus: new Map(),
+            docs: []
+        };
+
+        snap.forEach(doc => {
+            const a = doc.data();
+            ringkas.docs.push({ id: doc.id, data: a });
+
+            const status = String(a.status || "").trim();
+            const tanggal = normalisasiTanggalAbsen(a);
+
+            // Untuk hitungan hari, satu tanggal hanya dihitung sekali.
+            // Prioritas status: Hadir/Telat/Sakit/Alpha/Libur.
+            if (tanggal) {
+                const existing = ringkas.tanggalStatus.get(tanggal);
+                const priority = {
+                    "Hadir": 5,
+                    "Telat": 5,
+                    "Sakit": 4,
+                    "Alpha": 3,
+                    "Libur Reguler": 2
+                };
+                if (!existing || (priority[status] || 1) > (priority[existing] || 1)) {
+                    ringkas.tanggalStatus.set(tanggal, status);
+                }
+            }
+
+            ringkas.kasbonUang += parseFloat(a.kasbonUang) || 0;
+            ringkas.kasbonMakan += parseFloat(a.kasbonMakan) || 0;
+        });
+
+        // Hitung dari tanggal unik agar duplikasi dokumen tidak menggandakan hari.
+        ringkas.tanggalStatus.forEach(status => {
+            if (status === "Hadir") ringkas.hadir++;
+            else if (status === "Telat") ringkas.telat++;
+            else if (status === "Sakit") ringkas.sakit++;
+            else if (status === "Alpha") ringkas.alpha++;
+            else if (status === "Libur Reguler") ringkas.libur++;
+        });
+
+        return ringkas;
+    }
+
+    function hitungTargetHariKerja(tahun, bulan, dataKaryawan, jumlahLiburAktual) {
+        // Aturan payroll perusahaan:
+        // Januari, Maret-Desember = 26 hari dasar.
+        // Februari = 24 hari dasar.
+        // Ini adalah pembagi gaji harian, BUKAN batas maksimum hari dibayar.
+        return bulan === 1 ? 24 : 26;
+    }
+
     function kalkulasiOtomatisMasuk() {
-        const targetHari = parseInt(document.getElementById("target-hari-kerja").value) || 26;
-        const alpha = parseInt(document.getElementById("total-alpha").value) || 0;
-        const sakit = parseInt(document.getElementById("total-sakit").value) || 0;
-        let otomatisMasuk = targetHari - alpha - sakit; if(otomatisMasuk < 0) otomatisMasuk = 0;
-        document.getElementById("total-masuk").value = otomatisMasuk;
+        // Dipertahankan untuk kompatibilitas tombol/handler lama.
+        // Sekarang total masuk ditentukan oleh Firebase, bukan target-alpha-sakit.
+        const hadir = parseInt(document.getElementById("total-hadir-data")?.value) || 0;
+        const telat = parseInt(document.getElementById("total-telat")?.value) || 0;
+        if (document.getElementById("total-masuk")) {
+            document.getElementById("total-masuk").value = hadir + telat;
+        }
     }
 
     async function sinkronisasiDataAbsen() {
         const namaKaryawan = document.getElementById("pilih-karyawan").value;
         document.getElementById("hasil-gaji").style.display = "none";
-        document.getElementById("btn-outstanding").style.display = "none"; // Hide button initially
-        
+        document.getElementById("btn-outstanding").style.display = "none";
+
         if (!namaKaryawan) return showToast("Pilih karyawan dulu!", "warning");
 
-        showLoading("Menarik & Menyortir Data...");
+        showLoading("Menarik data absensi dari Cloud...");
         try {
             const dataKaryawan = arrUsers[namaKaryawan];
-            document.getElementById("form-komisi").style.display = dataKaryawan.perusahaan === "Warmindo" ? "none" : "block";
+            if (!dataKaryawan) throw new Error("Data karyawan tidak ditemukan.");
 
-            let hadirMurni = 0, telat = 0, sakit = 0, totalKasbonUang = 0, totalKasbonMakan = 0;
-            const bln = new Date().getMonth(); const thn = new Date().getFullYear();
+            const perusahaan = dataKaryawan.perusahaan || "";
+            document.getElementById("form-komisi").style.display =
+                perusahaan === "Warmindo" ? "none" : "block";
 
-            const snap = await db.collection("absensi").where("nama", "==", namaKaryawan).where("bulan", "==", bln).where("tahun", "==", thn).get();
+            const now = new Date();
+            const bln = now.getMonth();
+            const thn = now.getFullYear();
 
-            window.dataAbsenBulanIni = []; 
-            snap.forEach(doc => { window.dataAbsenBulanIni.push(doc.data()); });
+            const ringkas = await ambilRingkasanAbsensi(namaKaryawan, bln, thn);
+            window.ringkasanAbsenBulanIni = ringkas;
 
-            window.dataAbsenBulanIni.sort((a, b) => { return (parseInt(a.tanggal) || 0) - (parseInt(b.tanggal) || 0); });
+            window.dataAbsenBulanIni = ringkas.docs.map(x => x.data);
+            window.dataAbsenBulanIni.sort((a, b) =>
+                (parseInt(a.tanggal) || 0) - (parseInt(b.tanggal) || 0)
+            );
 
-            window.dataAbsenBulanIni.forEach(a => {
-                if (a.status === "Hadir") hadirMurni++;
-                if (a.status === "Telat") telat++;
-                if (a.status === "Sakit") sakit++;
-                totalKasbonUang += parseFloat(a.kasbonUang) || 0;
-                totalKasbonMakan += parseFloat(a.kasbonMakan) || 0;
-            });
+            const liburKalender = hitungHariLiburRegulerDalamBulan(
+                thn, bln, dataKaryawan.hariLibur
+            );
+            const liburFinal = Math.max(liburKalender, ringkas.libur);
+            const targetHari = hitungTargetHariKerja(
+                thn, bln, dataKaryawan, ringkas.libur
+            );
 
-            let jumlahLiburBulanIni = 4; 
-            if (dataKaryawan.hariLibur !== undefined && dataKaryawan.hariLibur !== "") {
-                const hariLiburTarget = parseInt(dataKaryawan.hariLibur); jumlahLiburBulanIni = 0;
-                const jumlahHariSebulan = new Date(thn, bln + 1, 0).getDate();
-                for (let i = 1; i <= jumlahHariSebulan; i++) {
-                    if (new Date(thn, bln, i).getDay() === hariLiburTarget) jumlahLiburBulanIni++;
-                }
-            }
+            // KRUSIAL: Total Masuk selalu Hadir + Telat.
+            const totalMasuk = ringkas.hadir + ringkas.telat;
 
-            document.getElementById("total-masuk").value = hadirMurni + telat; 
-            document.getElementById("total-telat").value = telat;
-            document.getElementById("total-sakit").value = sakit; 
-            document.getElementById("total-alpha").value = 0; 
-            document.getElementById("total-libur").value = jumlahLiburBulanIni;
-            document.getElementById("gaji-bulanan").value = dataKaryawan.gajiProporsional || 3000000;
-            document.getElementById("kasbon-barber").value = totalKasbonUang;
-            document.getElementById("kasbon-warmindo").value = totalKasbonMakan;
-        
-            showToast("Data berhasil ditarik & diurutkan per tanggal.", "success");
-        } catch(e) { console.error(e); showToast("Gagal menarik data.", "error"); }
-        hideLoading();
+            setNilaiSlip("target-hari-kerja", targetHari);
+            setNilaiSlip("total-masuk", totalMasuk);
+            setNilaiSlip("total-alpha", ringkas.alpha);
+            setNilaiSlip("total-sakit", ringkas.sakit);
+            setNilaiSlip("total-telat", ringkas.telat);
+            setNilaiSlip("total-libur", liburFinal);
+
+            const gajiProp = parseFloat(dataKaryawan.gajiProporsional) || 0;
+            document.getElementById("gaji-bulanan").value = gajiProp;
+
+            document.getElementById("kasbon-barber").value = Math.round(ringkas.kasbonUang);
+            document.getElementById("kasbon-warmindo").value = Math.round(ringkas.kasbonMakan);
+
+            // Jika tersedia outstanding bulan sebelumnya, pertahankan mekanisme lama.
+            // Detail outstanding tetap diproses oleh fungsi hitungGaji().
+            showToast(
+                `Data tersinkron: ${totalMasuk} hari masuk (${ringkas.hadir} Hadir + ${ringkas.telat} Telat), ${ringkas.alpha} Alpha, ${ringkas.sakit} Sakit.`,
+                "success"
+            );
+
+        } catch (e) {
+            console.error("Gagal sinkronisasi data absensi:", e);
+            showToast("Gagal menarik data absensi.", "error");
+        } finally {
+            hideLoading();
+        }
     }
 
+
     async function muatDataTerkiniKaryawan() {
-        const bln = new Date().getMonth(); const thn = new Date().getFullYear();
+        const bln = new Date().getMonth();
+        const thn = new Date().getFullYear();
+
         try {
-            const snap = await db.collection("absensi").where("nama", "==", currentUser.nama).where("bulan", "==", bln).where("tahun", "==", thn).get();
-            let telat = 0, sakit = 0, libur = 0;
-            snap.forEach(doc => {
-                const a = doc.data();
-                if (a.status === "Telat") telat++; if (a.status === "Sakit") sakit++; if (a.status === "Libur Reguler") libur++;
-            });
-            document.getElementById("kt-telat").innerText = telat + " Hari";
-            document.getElementById("kt-sakit").innerText = sakit + " Hari";
-            document.getElementById("kt-libur").innerText = libur + " Hari";
-        } catch(e) { console.error("Gagal memuat data terkini"); }
+            const ringkas = await ambilRingkasanAbsensi(currentUser.nama, bln, thn);
+            const masuk = ringkas.hadir + ringkas.telat;
+
+            document.getElementById("kt-telat").innerText = ringkas.telat + " Hari";
+            document.getElementById("kt-sakit").innerText = ringkas.sakit + " Hari";
+            document.getElementById("kt-libur").innerText = ringkas.libur + " Hari";
+
+            const alphaEl = document.getElementById("kt-alpha");
+            if (alphaEl) alphaEl.innerText = ringkas.alpha + " Hari";
+
+            const masukEl = document.getElementById("kt-masuk");
+            if (masukEl) masukEl.innerText = masuk + " Hari";
+        } catch(e) {
+            console.error("Gagal memuat data terkini:", e);
+        }
     }
 
     // UPDATE PENTING: LOGIKA OUTSTANDING KASBON SLIP GAJI
+    // ATURAN PAYROLL 26/24:
+    // Februari = 24 hari dasar; bulan lainnya = 26 hari dasar.
+    // Hari dasar hanya menentukan upah harian.
+    // Total masuk aktual tidak dibatasi: 27 hari masuk = 27 hari dibayar.
     function hitungGaji() {
         const namaKaryawan = document.getElementById("pilih-karyawan").value;
         if (!namaKaryawan) return showToast("Harap pilih karyawan terlebih dahulu!", "warning");
@@ -1473,17 +1726,18 @@
         const gajiBulanan = parseFloat(document.getElementById("gaji-bulanan").value) || 0;
         const gajiHarian = Math.floor(gajiBulanan / targetHari);
         
-        let totalLiburInput = parseInt(document.getElementById("total-libur").value) || 0;
-        let liburFinal = totalLiburInput; let alphaTambahan = 0;
+        const liburFinal = Math.max(0, parseInt(document.getElementById("total-libur").value) || 0);
+        const totalAlphaFinal = Math.max(0, parseInt(document.getElementById("total-alpha").value) || 0);
+        const totalMasuk = Math.max(0, parseInt(document.getElementById("total-masuk").value) || 0);
+        const telat = Math.max(0, parseInt(document.getElementById("total-telat").value) || 0);
+        const sakit = Math.max(0, parseInt(document.getElementById("total-sakit").value) || 0);
 
-        if (totalLiburInput > 4) { liburFinal = 4; alphaTambahan = totalLiburInput - 4; }
-        
-        let alphaManual = parseInt(document.getElementById("total-alpha").value) || 0;
-        let totalAlphaFinal = alphaManual + alphaTambahan;
-
-        const totalMasuk = parseInt(document.getElementById("total-masuk").value) || 0;
-        const telat = parseInt(document.getElementById("total-telat").value) || 0;
-        const sakit = parseInt(document.getElementById("total-sakit").value) || 0;
+        // Konsistensi final: Total Masuk selalu minimal Hadir + Telat.
+        // Hadir dapat dibaca dari ringkasan Firebase yang terakhir ditarik.
+        const hadirTersinkron = window.ringkasanAbsenBulanIni
+            ? (parseInt(window.ringkasanAbsenBulanIni.hadir) || 0)
+            : Math.max(0, totalMasuk - telat);
+        const totalMasukFinal = Math.max(0, totalMasuk, hadirTersinkron + telat);
         
         const kbUang = parseFloat(document.getElementById("kasbon-barber").value) || 0;
         const kbMakan = parseFloat(document.getElementById("kasbon-warmindo").value) || 0;
@@ -1494,7 +1748,7 @@
         let dendaPerHari = (perusahaan === "Barbershop") ? 25000 : 10000;
         let totalDendaTelat = telat > 3 ? telat * dendaPerHari : 0;
         
-        let gajiMasukKerja = totalMasuk * gajiHarian;
+        let gajiMasukKerja = totalMasukFinal * gajiHarian;
         let uangSakit = Math.floor(sakit * (gajiHarian / 2));
         let uangLembur = (lp * 30000) + (lf * gajiHarian);
         let insentif = (perusahaan === "Barbershop") ? Math.floor(om * 0.20) : 0;
@@ -1553,7 +1807,7 @@ TOTAL LIBUR REGULER : ${liburFinal}X | ALPHA : ${totalAlphaFinal}X | TELAT : ${t
 
 💵 PERHITUNGAN BASIC:
 • GAJI PROPORSIONAL : ${gajiBulanan.toLocaleString('id-ID')} : ${targetHari} HARI = ${gajiHarian.toLocaleString('id-ID')}
-• MASUK KERJA (${totalMasuk} HARI) : ${totalMasuk} X ${gajiHarian.toLocaleString('id-ID')} = ${gajiMasukKerja.toLocaleString('id-ID')}
+• MASUK KERJA (${totalMasukFinal} HARI) : ${totalMasukFinal} X ${gajiHarian.toLocaleString('id-ID')} = ${gajiMasukKerja.toLocaleString('id-ID')}
 
 💰 PENDAPATAN:
 • UANG SAKIT = ${uangSakit.toLocaleString('id-ID')}
