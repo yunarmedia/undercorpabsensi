@@ -9,6 +9,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Undercorp">
+    <meta name="app-version" content="2026.08.29.01">
     <link rel="icon" type="image/png" href="179386_2.png">
     <link rel="apple-touch-icon" href="179386_2.png">
     <link rel="manifest" href="manifest.json">
@@ -666,6 +667,14 @@
                         <input type="text" id="filter-nama" placeholder="Ketik nama..." oninput="renderTabelAbsen()">
                     </div>
                     <div class="form-group" style="margin-bottom: 0;">
+                        <label style="font-size: 11px;">Bulan Data</label>
+                        <select id="filter-bulan"></select>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label style="font-size: 11px;">Tahun Data</label>
+                        <select id="filter-tahun"></select>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
                         <label style="font-size: 11px;">Saring Berdasarkan Status</label>
                         <select id="filter-status" onchange="renderTabelAbsen()">
                             <option value="Semua">Semua Status (Tampilkan Semua)</option>
@@ -768,10 +777,36 @@
     
     window.addEventListener('DOMContentLoaded', periksaModeAplikasi);
 
-    if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            if (window.location.protocol === 'file:') console.log('Sistem: Mode Pratinjau Lokal terdeteksi.');
-            else navigator.serviceWorker.register('./sw.js').catch((err) => console.error('SW Gagal:', err));
+    // ==========================================
+    // SERVICE WORKER / PWA - AMAN UNTUK GITHUB PAGES
+    // ==========================================
+    // File HTML yang dibuka dari file:// atau content:// (misalnya
+    // File Manager Android) bukan secure origin, sehingga Service Worker
+    // TIDAK boleh didaftarkan di sana.
+    //
+    // Di GitHub Pages (https://...) Service Worker didaftarkan dan dipaksa
+    // mengecek versi terbaru agar update kode tidak tertahan cache lama.
+    const SW_VERSION = "2026.08.29.01";
+
+    if ("serviceWorker" in navigator) {
+        window.addEventListener("load", async () => {
+            const protocol = window.location.protocol;
+
+            if (protocol !== "http:" && protocol !== "https:") {
+                console.log("PWA: Service Worker dilewati. Origin saat ini:", window.location.origin);
+                return;
+            }
+
+            try {
+                const registration = await navigator.serviceWorker.register(
+                    "./sw.js?v=" + SW_VERSION,
+                    { updateViaCache: "none" }
+                );
+                await registration.update();
+                console.log("PWA: Service Worker aktif, versi:", SW_VERSION);
+            } catch (err) {
+                console.warn("PWA: Service Worker tidak tersedia pada origin ini:", err);
+            }
         });
     }
 
@@ -830,7 +865,7 @@
                     await fetchUsers(); 
                     const shiftSnap = await db.collection("shifts").get();
                     arrShifts = []; shiftSnap.forEach(s => arrShifts.push(s.data()));
-                    muatDaftarShiftAdmin(); muatDataKaryawanAdmin(); muatTabelAbsen();
+                    muatDaftarShiftAdmin(); muatDataKaryawanAdmin(); siapkanFilterPeriodeAbsensi(); muatTabelAbsen();
                     muatDashboardOwnerAtauAdmin("admin-charts-container");
                     showToast("Selamat datang Admin Utama!", "success");
 
@@ -1202,20 +1237,89 @@
         } catch(e) { hideLoading(); showToast("Gagal menyimpan data kasbon.", "error"); }
     }
 
+    function siapkanFilterPeriodeAbsensi() {
+        const bulanEl = document.getElementById("filter-bulan");
+        const tahunEl = document.getElementById("filter-tahun");
+        if (!bulanEl || !tahunEl) return;
+
+        const namaBulan = [
+            "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+            "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+        ];
+
+        if (!bulanEl.options.length) {
+            bulanEl.innerHTML = namaBulan.map((nama, i) =>
+                `<option value="${i}">${nama}</option>`
+            ).join("");
+        }
+
+        const tahunSekarang = new Date().getFullYear();
+        if (!tahunEl.options.length) {
+            let html = "";
+            for (let t = tahunSekarang - 2; t <= tahunSekarang + 1; t++) {
+                html += `<option value="${t}">${t}</option>`;
+            }
+            tahunEl.innerHTML = html;
+        }
+
+        if (!bulanEl.dataset.ready) {
+            bulanEl.value = String(new Date().getMonth());
+            tahunEl.value = String(tahunSekarang);
+            bulanEl.dataset.ready = "1";
+            bulanEl.onchange = () => muatTabelAbsen();
+            tahunEl.onchange = () => muatTabelAbsen();
+        }
+    }
+
     async function muatTabelAbsen() {
-        showLoading("Mengambil riwayat data..."); 
+        siapkanFilterPeriodeAbsensi();
+        showLoading("Mengambil seluruh data periode...");
+
         try {
-            const snapshot = await db.collection("absensi").orderBy("timestamp", "desc").limit(200).get();
-            allAbsenData = []; snapshot.forEach(doc => { allAbsenData.push({ id: doc.id, ...doc.data() }); });
-            renderTabelAbsen(); 
-        } catch(e) { showToast("Gagal menarik riwayat.", "error"); }
-        hideLoading();
+            const bulan = parseInt(document.getElementById("filter-bulan").value);
+            const tahun = parseInt(document.getElementById("filter-tahun").value);
+
+            if (Number.isNaN(bulan) || Number.isNaN(tahun)) {
+                throw new Error("Periode tidak valid.");
+            }
+
+            // FIX: tidak lagi menggunakan limit(200).
+            // Ambil semua record pada bulan/tahun yang dipilih.
+            // Pengurutan dilakukan di browser agar tidak memerlukan
+            // composite index Firestore tambahan.
+            const snapshot = await db.collection("absensi")
+                .where("bulan", "==", bulan)
+                .where("tahun", "==", tahun)
+                .get();
+
+            allAbsenData = [];
+            snapshot.forEach(doc => {
+                allAbsenData.push({ id: doc.id, ...doc.data() });
+            });
+
+            allAbsenData.sort((a, b) => {
+                return (parseInt(b.timestamp) || 0) - (parseInt(a.timestamp) || 0);
+            });
+
+            renderTabelAbsen();
+
+            const namaBulan = document.getElementById("filter-bulan").options[bulan]?.text || "";
+            showToast(
+                `${namaBulan} ${tahun}: ${allAbsenData.length} data berhasil dimuat.`,
+                "success"
+            );
+        } catch (e) {
+            console.error("Gagal menarik riwayat:", e);
+            showToast("Gagal menarik data periode dari Firebase.", "error");
+        } finally {
+            hideLoading();
+        }
     }
 
     function renderTabelAbsen() {
         const tabel = document.getElementById("tabel-absen"); tabel.innerHTML = "";
-        const fNama = document.getElementById("filter-nama").value.toLowerCase();
-        const fStatus = document.getElementById("filter-status").value;
+        const fNama = (document.getElementById("filter-nama")?.value || "").toLowerCase();
+        const fStatus = document.getElementById("filter-status")?.value || "Semua";
 
         let filteredData = allAbsenData.filter(data => {
             if (fNama && !data.nama.toLowerCase().includes(fNama)) return false;
@@ -1239,7 +1343,7 @@
             if ((parseFloat(data.kasbonUang) + parseFloat(data.kasbonMakan)) > 0) { htmlKasbon = `U: ${data.kasbonUang}<br>M: ${data.kasbonMakan}`; }
             tabel.innerHTML += `<tr>
                 <td><b>${data.nama.toUpperCase()}</b><br>${data.fotoSelfie ? `<button onclick="lihatFotoUtuh('${data.id}')" style="padding:4px 8px; font-size:10px; width:auto; border-radius:4px; margin-top:5px; box-shadow:none;">Lihat Foto</button>` : ''}</td>
-                <td><div style="font-size:11px; line-height:1.4;">${data.waktu}</div></td>
+                <td><div style="font-size:11px; line-height:1.4;"><b>Tgl ${data.tanggal || "-"} / ${((parseInt(data.bulan) || 0) + 1)}</b><br>${data.waktu || "-"}</div></td>
                 <td><span style="background:${badgeColor}; color:white; padding:4px 8px; border-radius:12px; font-size:10px; display:inline-block; text-align:center;">${data.status}</span></td>
                 <td style="font-size:11px; font-weight:600;">${htmlKasbon}</td>
                 <td style="text-align: center;">
@@ -1605,10 +1709,8 @@
     }
 
     function hitungTargetHariKerja(tahun, bulan, dataKaryawan, jumlahLiburAktual) {
-        // Aturan payroll perusahaan:
-        // Januari, Maret-Desember = 26 hari dasar.
-        // Februari = 24 hari dasar.
-        // Ini adalah pembagi gaji harian, BUKAN batas maksimum hari dibayar.
+        // Payroll dasar: Februari = 24 hari, bulan lainnya = 26 hari.
+        // Ini hanya pembagi upah harian, bukan batas maksimal hari dibayar.
         return bulan === 1 ? 24 : 26;
     }
 
