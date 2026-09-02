@@ -1273,43 +1273,54 @@
 
     async function muatTabelAbsen() {
         siapkanFilterPeriodeAbsensi();
-        showLoading("Mengambil seluruh data periode...");
+        showLoading("Mengambil data periode...");
 
         try {
-            const bulan = parseInt(document.getElementById("filter-bulan").value);
-            const tahun = parseInt(document.getElementById("filter-tahun").value);
+            const bulanEl = document.getElementById("filter-bulan");
+            const tahunEl = document.getElementById("filter-tahun");
+            const bulan = parseInt(bulanEl.value, 10);
+            const tahun = parseInt(tahunEl.value, 10);
 
             if (Number.isNaN(bulan) || Number.isNaN(tahun)) {
                 throw new Error("Periode tidak valid.");
             }
 
-            // FIX: tidak lagi menggunakan limit(200).
-            // Ambil semua record pada bulan/tahun yang dipilih.
-            // Pengurutan dilakukan di browser agar tidak memerlukan
-            // composite index Firestore tambahan.
+            /*
+             * FIX FIREBASE:
+             * Jangan gunakan dua .where(bulan) + .where(tahun) sekaligus.
+             * Pada project Firestore tertentu kombinasi tersebut dapat meminta
+             * composite index dan menghasilkan error saat halaman dibuka.
+             *
+             * Gunakan SATU filter tahun (single-field index otomatis), lalu
+             * saring bulan di browser. Tidak mengubah struktur data lama.
+             * Tidak ada limit(200), sehingga data tanggal awal bulan tetap muncul.
+             */
             const snapshot = await db.collection("absensi")
-                .where("bulan", "==", bulan)
                 .where("tahun", "==", tahun)
                 .get();
 
             allAbsenData = [];
             snapshot.forEach(doc => {
-                allAbsenData.push({ id: doc.id, ...doc.data() });
+                const data = doc.data();
+                if (parseInt(data.bulan, 10) === bulan) {
+                    allAbsenData.push({ id: doc.id, ...data });
+                }
             });
 
+            // Urutkan terbaru -> terlama tanpa orderBy Firestore.
             allAbsenData.sort((a, b) => {
-                return (parseInt(b.timestamp) || 0) - (parseInt(a.timestamp) || 0);
+                return (parseInt(b.timestamp, 10) || 0) - (parseInt(a.timestamp, 10) || 0);
             });
 
             renderTabelAbsen();
 
-            const namaBulan = document.getElementById("filter-bulan").options[bulan]?.text || "";
+            const namaBulan = bulanEl.options[bulan]?.text || "";
             showToast(
                 `${namaBulan} ${tahun}: ${allAbsenData.length} data berhasil dimuat.`,
                 "success"
             );
         } catch (e) {
-            console.error("Gagal menarik riwayat:", e);
+            console.error("Gagal menarik data periode:", e);
             showToast("Gagal menarik data periode dari Firebase.", "error");
         } finally {
             hideLoading();
