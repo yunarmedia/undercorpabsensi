@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="id">
 <head>
+<!-- ABSENSI PAGINATION FIX 2026-09-02 -->
+<meta name="fixed-period-version" content="firebase-diagnostic-fallback-2026.09.02">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Undercorp - Portal HRIS Pro</title>
@@ -1273,59 +1275,149 @@
 
     async function muatTabelAbsen() {
         siapkanFilterPeriodeAbsensi();
-        showLoading("Mengambil data periode...");
+        showLoading("Mengambil data absensi...");
+
+        let lastFirebaseError = null;
 
         try {
             const bulanEl = document.getElementById("filter-bulan");
             const tahunEl = document.getElementById("filter-tahun");
-            const bulan = parseInt(bulanEl.value, 10);
-            const tahun = parseInt(tahunEl.value, 10);
+            const bulanTarget = parseInt(bulanEl.value, 10);
+            const tahunTarget = parseInt(tahunEl.value, 10);
 
-            if (Number.isNaN(bulan) || Number.isNaN(tahun)) {
+            if (Number.isNaN(bulanTarget) || Number.isNaN(tahunTarget)) {
                 throw new Error("Periode tidak valid.");
             }
 
-            /*
-             * FIX FIREBASE:
-             * Jangan gunakan dua .where(bulan) + .where(tahun) sekaligus.
-             * Pada project Firestore tertentu kombinasi tersebut dapat meminta
-             * composite index dan menghasilkan error saat halaman dibuka.
-             *
-             * Gunakan SATU filter tahun (single-field index otomatis), lalu
-             * saring bulan di browser. Tidak mengubah struktur data lama.
-             * Tidak ada limit(200), sehingga data tanggal awal bulan tetap muncul.
-             */
-            const snapshot = await db.collection("absensi")
-                .where("tahun", "==", tahun)
-                .get();
+            const PAGE_SIZE = 200;
+            const hasil = [];
+            const seen = new Set();
 
-            allAbsenData = [];
+            /*
+             * FIREBASE READ STRATEGY
+             *
+             * Rules yang diberikan user adalah allow read/write: if true,
+             * sehingga query absensi tidak perlu dibatasi oleh request.auth.
+             *
+             * Kita coba query yang kompatibel dengan struktur lama terlebih
+             * dahulu. Jika orderBy(timestamp) gagal (mis. ada masalah index/
+             * data lama), otomatis fallback ke query tanpa orderBy.
+             */
+            let snapshot;
+            try {
+                snapshot = await db.collection("absensi")
+                    .orderBy("timestamp", "desc")
+                    .get();
+            } catch (errOrder) {
+                lastFirebaseError = errOrder;
+                console.warn("Query absensi orderBy(timestamp) gagal. Fallback:", errOrder);
+
+                // Fallback tanpa orderBy: tidak membutuhkan index.
+                snapshot = await db.collection("absensi").get();
+            }
+
             snapshot.forEach(doc => {
-                const data = doc.data();
-                if (parseInt(data.bulan, 10) === bulan) {
-                    allAbsenData.push({ id: doc.id, ...data });
+                if (seen.has(doc.id)) return;
+                seen.add(doc.id);
+
+                const data = doc.data() || {};
+
+                let bulanData = Number(data.bulan);
+                let tahunData = Number(data.tahun);
+                let tanggalData = Number(data.tanggal);
+
+                let ts = 0;
+                if (data.timestamp?.toMillis) {
+                    ts = data.timestamp.toMillis();
+                } else if (Number.isFinite(Number(data.timestamp))) {
+                    ts = Number(data.timestamp);
+                }
+
+                // Data lama: ambil kalender dari timestamp jika field
+                // tanggal/bulan/tahun tidak lengkap.
+                if (ts) {
+                    const d = new Date(ts);
+                    if (!Number.isNaN(d.getTime())) {
+                        if (!Number.isInteger(bulanData) || bulanData < 0 || bulanData > 11) {
+                            bulanData = d.getMonth();
+                        }
+                        if (!Number.isInteger(tahunData) || tahunData < 2000) {
+                            tahunData = d.getFullYear();
+                        }
+                        if (!Number.isInteger(tanggalData) || tanggalData < 1 || tanggalData > 31) {
+                            tanggalData = d.getDate();
+                        }
+                    }
+                }
+
+                if (bulanData === bulanTarget && tahunData === tahunTarget) {
+                    hasil.push({
+                        id: doc.id,
+                        ...data,
+                        tanggal: tanggalData,
+                        bulan: bulanData,
+                        tahun: tahunData,
+                        _sortTimestamp: ts
+                    });
                 }
             });
 
-            // Urutkan terbaru -> terlama tanpa orderBy Firestore.
-            allAbsenData.sort((a, b) => {
-                return (parseInt(b.timestamp, 10) || 0) - (parseInt(a.timestamp, 10) || 0);
+            hasil.sort((a, b) => {
+                const ta = Number(a._sortTimestamp) || 0;
+                const tb = Number(b._sortTimestamp) || 0;
+                return tb - ta;
             });
 
+            hasil.forEach(item => delete item._sortTimestamp);
+
+            allAbsenData = hasil;
             renderTabelAbsen();
 
-            const namaBulan = bulanEl.options[bulan]?.text || "";
+            const namaBulan = bulanEl.options[bulanTarget]?.text || "";
+            console.log(
+                `Absensi ${namaBulan} ${tahunTarget}: ${allAbsenData.length} dokumen.`
+            );
+
             showToast(
-                `${namaBulan} ${tahun}: ${allAbsenData.length} data berhasil dimuat.`,
+                `${namaBulan} ${tahunTarget}: ${allAbsenData.length} data berhasil dimuat.`,
                 "success"
             );
+
         } catch (e) {
-            console.error("Gagal menarik data periode:", e);
-            showToast("Gagal menarik data periode dari Firebase.", "error");
+            console.error("=== FIREBASE ABSENSI ERROR ===");
+            console.error("code:", e?.code);
+            console.error("message:", e?.message);
+            console.error("name:", e?.name);
+            console.error("details:", e);
+
+            // Tampilkan error Firebase sebenarnya agar diagnosis tidak lagi
+            // tertutup oleh pesan generik.
+            const code = e?.code || lastFirebaseError?.code || "unknown";
+            const message = e?.message || lastFirebaseError?.message || "Tidak diketahui";
+
+            showToast(
+                `Firebase Error [${code}]: ${message}`,
+                "error"
+            );
         } finally {
             hideLoading();
         }
     }
+
+
+    // Diagnostik koneksi Firestore — tidak mengubah GPS atau data absensi.
+    window.testFirebaseAbsensi = async function() {
+        try {
+            const snap = await db.collection("absensi").limit(1).get();
+            console.log("FIREBASE ABSENSI OK:", snap.size, "dokumen");
+            showToast(`Firebase absensi OK (${snap.size} data uji).`, "success");
+            return { ok: true, size: snap.size };
+        } catch (e) {
+            console.error("FIREBASE ABSENSI TEST GAGAL:", e);
+            showToast(`Firebase [${e?.code || "unknown"}]: ${e?.message || "gagal"}`, "error");
+            return { ok: false, code: e?.code, message: e?.message };
+        }
+    };
 
     function renderTabelAbsen() {
         const tabel = document.getElementById("tabel-absen"); tabel.innerHTML = "";
@@ -1333,7 +1425,7 @@
         const fStatus = document.getElementById("filter-status")?.value || "Semua";
 
         let filteredData = allAbsenData.filter(data => {
-            if (fNama && !data.nama.toLowerCase().includes(fNama)) return false;
+            if (fNama && !(data.nama || "").toString().toLowerCase().includes(fNama)) return false;
             if (fStatus !== "Semua") {
                 if (fStatus === "Data Kasbon") {
                     const totKb = (parseFloat(data.kasbonUang) || 0) + (parseFloat(data.kasbonMakan) || 0);
@@ -1353,12 +1445,12 @@
             let htmlKasbon = "-";
             if ((parseFloat(data.kasbonUang) + parseFloat(data.kasbonMakan)) > 0) { htmlKasbon = `U: ${data.kasbonUang}<br>M: ${data.kasbonMakan}`; }
             tabel.innerHTML += `<tr>
-                <td><b>${data.nama.toUpperCase()}</b><br>${data.fotoSelfie ? `<button onclick="lihatFotoUtuh('${data.id}')" style="padding:4px 8px; font-size:10px; width:auto; border-radius:4px; margin-top:5px; box-shadow:none;">Lihat Foto</button>` : ''}</td>
+                <td><b>${(data.nama || "-").toString().toUpperCase()}</b><br>${data.fotoSelfie ? `<button onclick="lihatFotoUtuh('${data.id}')" style="padding:4px 8px; font-size:10px; width:auto; border-radius:4px; margin-top:5px; box-shadow:none;">Lihat Foto</button>` : ''}</td>
                 <td><div style="font-size:11px; line-height:1.4;"><b>Tgl ${data.tanggal || "-"} / ${((parseInt(data.bulan) || 0) + 1)}</b><br>${data.waktu || "-"}</div></td>
                 <td><span style="background:${badgeColor}; color:white; padding:4px 8px; border-radius:12px; font-size:10px; display:inline-block; text-align:center;">${data.status}</span></td>
                 <td style="font-size:11px; font-weight:600;">${htmlKasbon}</td>
                 <td style="text-align: center;">
-                    ${data.lokasi !== "-" && data.lokasi !== "Input Manual Admin" && !data.lokasi.includes("Sistem Otomatis") ? `<a href="${data.lokasi}" target="_blank" style="font-size:11px; display:block; margin-bottom:8px; color:var(--primary-color); font-weight:bold;">Maps</a>` : `<span style="font-size:10px; color:#94a3b8; display:block; margin-bottom:5px;">Manual/Sistem</span>`}
+                    ${data.lokasi !== "-" && data.lokasi !== "Input Manual Admin" && !(data.lokasi || "").toString().includes("Sistem Otomatis") ? `<a href="${data.lokasi}" target="_blank" style="font-size:11px; display:block; margin-bottom:8px; color:var(--primary-color); font-weight:bold;">Maps</a>` : `<span style="font-size:10px; color:#94a3b8; display:block; margin-bottom:5px;">Manual/Sistem</span>`}
                     <button onclick="hapusSatuAbsensi('${data.id}')" style="background:var(--danger-color); padding:4px 8px; font-size:10px; width:auto; margin:0 auto; box-shadow:none; border-radius:4px;">Hapus</button>
                 </td>
             </tr>`;
