@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <!-- ABSENSI PAGINATION FIX 2026-09-02 -->
-<meta name="fixed-period-version" content="firebase-diagnostic-fallback-2026.09.02">
+<meta name="fixed-period-version" content="final-alpha-manual-2026.09.11">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Undercorp - Portal HRIS Pro</title>
@@ -413,6 +413,18 @@
                 Fitur ini akan mengecek kalender bulan ini dari tanggal 1 hingga hari ini. Jika ada karyawan yang jadwal liburnya terlewat namun datanya belum masuk, sistem akan otomatis membuatkannya.
             </div>
             <button onclick="generateLiburMassalBulanIni()" style="background: linear-gradient(135deg, var(--primary-color), var(--primary-hover)); padding: 16px;">Jalankan Sinkronisasi Libur Bulan Ini</button>
+        </div>
+
+
+        <!-- GENERATOR ALPHA MANUAL / KOREKSI ABSENSI KOSONG -->
+        <div class="card" style="border-top: 4px solid var(--danger-color);">
+            <h3 style="color: var(--danger-color);">🚨 Isi Alpha Otomatis</h3>
+            <div class="info-box" style="background: rgba(185, 28, 28, 0.05); color: #991b1b; border-color: rgba(185, 28, 28, 0.18); text-align: left; font-size: 12px; line-height: 1.5;">
+                Sistem mengecek semua karyawan dari tanggal 1 sampai <b>kemarin</b>. Jika tanggal belum memiliki data absensi, sistem akan mengisinya sebagai <b>Alpha</b>. Jika tanggal tersebut adalah jadwal libur reguler karyawan, sistem akan mengisinya sebagai <b>Libur Reguler</b>. <b>Hari ini tidak akan diisi Alpha.</b>
+            </div>
+            <button onclick="generateAlphaOtomatisManual()" style="background: linear-gradient(135deg, #dc2626, #991b1b); padding: 16px;">
+                🚨 Isi Semua Alpha yang Masih Kosong
+            </button>
         </div>
 
         <!-- INPUT KASBON (ADMIN) -->
@@ -864,7 +876,16 @@
                 // ROUTING AKSES
                 if (currentUser.nama === "admin" || (currentUser.role === "admin" && currentUser.posisi !== "KASIR/ADMIN")) {
                     document.getElementById("admin-section").classList.remove("hidden");
-                    await fetchUsers(); 
+                    await fetchUsers();
+                    // AUTO ALPHA: setiap Admin masuk, isi tanggal yang sudah lewat
+                    // dan masih kosong. Hari ini tidak pernah dibuat Alpha.
+                    try {
+                        const hasilAutoAlpha = await generateAlphaOtomatis();
+                        console.log("Auto Alpha saat login Admin:", hasilAutoAlpha);
+                    } catch (errAlphaLogin) {
+                        console.error("Auto Alpha saat login gagal:", errAlphaLogin);
+                    }
+
                     const shiftSnap = await db.collection("shifts").get();
                     arrShifts = []; shiftSnap.forEach(s => arrShifts.push(s.data()));
                     muatDaftarShiftAdmin(); muatDataKaryawanAdmin(); siapkanFilterPeriodeAbsensi(); muatTabelAbsen();
@@ -1698,18 +1719,28 @@
         const thn = now.getFullYear();
         const kemarin = now.getDate() - 1;
 
-        if (kemarin < 1) return { alpha: 0, libur: 0 };
+        if (kemarin < 1) return { alpha: 0, libur: 0, totalKosong: 0 };
 
         let alphaDibuat = 0;
         let liburDibuat = 0;
+        let totalKosong = 0;
+
+        if (!arrUsers || Object.keys(arrUsers).length === 0) {
+            await fetchUsers();
+        }
 
         for (const nama in arrUsers) {
             const user = arrUsers[nama] || {};
             if (nama === "admin" || user.role === "owner") continue;
-            if (user.hariLibur === undefined || user.hariLibur === "") continue;
 
-            const hariLibur = parseInt(user.hariLibur);
-            if (Number.isNaN(hariLibur)) continue;
+            // Jika hariLibur tidak diisi, tidak ada hari libur reguler:
+            // tanggal kosong yang sudah lewat menjadi Alpha.
+            const hariLiburRaw = user.hariLibur;
+            const hariLibur = (
+                hariLiburRaw !== undefined &&
+                hariLiburRaw !== null &&
+                String(hariLiburRaw).trim() !== ""
+            ) ? parseInt(hariLiburRaw, 10) : null;
 
             const snap = await db.collection("absensi")
                 .where("nama", "==", nama)
@@ -1719,38 +1750,96 @@
 
             const tanggalSudahAda = new Set();
             snap.forEach(doc => {
-                const t = normalisasiTanggalAbsen(doc.data());
-                if (t) tanggalSudahAda.add(t);
+                const t = normalisasiTanggalAbsen(doc.data() || {});
+                if (t) tanggalSudahAda.add(Number(t));
             });
+
+            let batch = db.batch();
+            let batchCount = 0;
 
             for (let tgl = 1; tgl <= kemarin; tgl++) {
                 if (tanggalSudahAda.has(tgl)) continue;
 
+                totalKosong++;
+
                 const tanggalObj = new Date(thn, bln, tgl, 12, 0, 0);
-                const isLibur = tanggalObj.getDay() === hariLibur;
+                const isLibur =
+                    Number.isInteger(hariLibur) &&
+                    hariLibur >= 0 &&
+                    hariLibur <= 6 &&
+                    tanggalObj.getDay() === hariLibur;
+
                 const status = isLibur ? "Libur Reguler" : "Alpha";
+                const id = `absen_${nama}_${thn}_${String(bln + 1).padStart(2, "0")}_${String(tgl).padStart(2, "0")}`;
 
-                await simpanAbsensiHarian(
+                const ref = db.collection("absensi").doc(id);
+
+                batch.set(ref, {
                     nama,
-                    `${thn}-${String(bln + 1).padStart(2, "0")}-${String(tgl).padStart(2, "0")}`,
+                    perusahaan: user.perusahaan || "",
+                    posisi: user.posisi || "",
                     status,
-                    {
-                        perusahaan: user.perusahaan || "",
-                        posisi: user.posisi || "",
-                        shift: isLibur ? "Libur Reguler" : "Tidak Absen",
-                        lokasi: "Sistem Otomatis",
-                        kasbonUang: 0,
-                        kasbonMakan: 0,
-                        fotoSelfie: null
-                    }
-                );
+                    shift: isLibur ? "Libur Reguler" : "Tidak Absen",
+                    kasbonUang: 0,
+                    kasbonMakan: 0,
+                    fotoBuktiKasbon: null,
+                    fotoSelfie: null,
+                    waktu: tanggalObj.toLocaleString("id-ID"),
+                    timestamp: tanggalObj.getTime(),
+                    tanggal: tgl,
+                    bulan: bln,
+                    tahun: thn,
+                    lokasi: "Sistem Otomatis"
+                });
 
+                batchCount++;
                 if (isLibur) liburDibuat++;
                 else alphaDibuat++;
+
+                if (batchCount >= 450) {
+                    await batch.commit();
+                    batch = db.batch();
+                    batchCount = 0;
+                }
+            }
+
+            if (batchCount > 0) {
+                await batch.commit();
             }
         }
 
-        return { alpha: alphaDibuat, libur: liburDibuat };
+        return { alpha: alphaDibuat, libur: liburDibuat, totalKosong };
+    }
+
+    async function generateAlphaOtomatisManual() {
+        showLoading("Mengecek absensi kosong & mengisi Alpha...");
+        try {
+            const hasil = await generateAlphaOtomatis();
+            await muatTabelAbsen();
+
+            if (hasil.totalKosong === 0) {
+                showToast(
+                    "Tidak ada tanggal kosong yang perlu diisi.",
+                    "success"
+                );
+            } else {
+                showToast(
+                    `Selesai! ${hasil.alpha} Alpha + ${hasil.libur} Libur Reguler ditambahkan.`,
+                    "success"
+                );
+            }
+
+            return hasil;
+        } catch (e) {
+            console.error("Gagal mengisi Alpha otomatis:", e);
+            showToast(
+                `Gagal mengisi Alpha: ${e?.message || "Terjadi kesalahan."}`,
+                "error"
+            );
+            throw e;
+        } finally {
+            hideLoading();
+        }
     }
 
     async function ambilRingkasanAbsensi(namaKaryawan, bulan = new Date().getMonth(), tahun = new Date().getFullYear()) {
